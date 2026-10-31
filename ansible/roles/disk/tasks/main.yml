@@ -69,14 +69,28 @@
     boot_end_mib: "{{ 1 + (efi_size_mib | int) + (boot_size_mib | int) }}"
     luks_start_mib: "{{ 1 + (efi_size_mib | int) + (boot_size_mib | int) }}"
 
-- name: Force kernel to release the old partition table
+- name: Force release all device-mapper references
   ansible.builtin.shell: |
-    # Принудительно заставляем ядро перечитать таблицу разделов
+    set -euo pipefail
+
+    # 1. Отключаем swap на целевом диске, если он есть
+    swapoff -a || true
+
+    # 2. Принудительно удаляем все device-mapper устройства
+    # (это освободит LUKS и LVM, если они остались в памяти ядра)
+    dmsetup remove_all || true
+
+    # 3. Очищаем сигнатуры (GPT, LUKS, LVM) с диска
+    wipefs -a {{ target_disk }} || true
+
+    # 4. Принудительно заставляем ядро перечитать таблицу разделов
     partprobe {{ target_disk }} || true
     blockdev --rereadpt {{ target_disk }} || true
 
-    # Ждем, пока udev завершит обработку изменений
+    # 5. Даем udev время завершить обработку событий
     udevadm settle
+  args:
+    executable: /bin/bash
   changed_when: false
   failed_when: false
 
