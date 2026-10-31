@@ -239,9 +239,11 @@
   when: base_user_check.rc != 0
   register: base_user_create
 
-- name: Ensure the user is in all required groups
+- name: Ensure the user is in all required groups and has the correct shell
   ansible.builtin.command: >-
-    chroot {{ root_mnt }} usermod -aG {{ workstation_user_groups | join(',') }}
+    chroot {{ root_mnt }} usermod
+    -aG {{ workstation_user_groups | join(',') }}
+    -s {{ workstation_user_shell }}
     {{ workstation_user }}
   changed_when: false
 

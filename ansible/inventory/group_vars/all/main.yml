@@ -132,7 +132,7 @@ keyboard_options: "grp:caps_toggle,caps:none"
 # The daily user.  Root is deliberately locked; this user must be in `wheel`
 # because /etc/doas.conf grants privileges through that group.
 workstation_user: devops
-workstation_user_shell: /bin/bash
+workstation_user_shell: /usr/bin/zsh
 workstation_user_groups:
   - wheel
   - netdev

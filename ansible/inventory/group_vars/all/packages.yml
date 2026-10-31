@@ -55,6 +55,7 @@ apt_packages:
   - fdisk
 
   # --- base CLI and editors -------------------------------------------------
+  - zsh
   - opendoas
   - neovim
   - wget
