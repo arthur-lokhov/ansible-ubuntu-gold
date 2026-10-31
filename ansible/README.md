@@ -44,34 +44,56 @@ ansible/
 
 ---
 
-## 📋 Требования
+## 📋 Требования и подготовка окружения
 
 *   LiveUSB с Ubuntu 26.04 LTS, загруженный в режиме **UEFI** (Secure Boot можно оставить включенным).
 *   Целевой диск объемом не менее `disk_min_size_gb` (по умолчанию 560 ГиБ).
-*   Наличие `ansible-core` в Live-среде. В LiveCD его нет, установите через `venv`:
-    ```bash
-    sudo apt update && sudo apt install -y python3-venv python3-apt git
-    python3 -m venv .venv && source .venv/bin/activate
-    pip install --upgrade pip ansible-core
-    ```
 *   Скопированный проект (через USB, `scp` или `git clone`).
 
-*Примечание: Профиль оборудования (Intel i5-11400, AX210, RTX 3070) зашит в дефолтные значения. На другом железе потребуется изменить `target_disk`, список firmware-пакетов и `debootstrap_arch`.*
+> [!WARNING]  
+> **Критически важно для Ubuntu 26.04 (Python 3.14):**  
+> Встроенный в Ubuntu 26.04 Python 3.14 содержит баг, из-за которого Ansible падает с ошибкой `process object is closed` и ломает псевдотерминалы (`/dev/pts`). Чтобы этого избежать, **перед запуском плейбука обязательно выполните подготовку**, описанную ниже. 
 
----
-
-## 🚀 Быстрый старт
-
-### 1. Подготовка LiveCD
+### 1. Установка Ansible в изолированное окружение
+Находясь в корне проекта (где лежит `ansible.cfg`), выполните:
 ```bash
-# Опционально: доступ по SSH к Live-среде
-sudo apt update && sudo apt install -y openssh-server
-sudo passwd ubuntu
-sudo systemctl start ssh
-ip -br addr
+cd ~/ansible-ubuntu-gold/ansible
+
+# Установка системных зависимостей
+sudo apt update && sudo apt install -y python3-venv python3-apt git
+
+# Создание и активация venv
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Установка Ansible
+pip install --upgrade pip ansible-core
 ```
 
-### 2. Создание файла секретов
+### 2. Обход бага Python 3.14 (Обязательно!)
+Сразу после активации `venv` выполните эти команды в текущей сессии терминала. Они заставляют Python использовать старый безопасный метод создания процессов и очищают разделяемую память:
+
+```bash
+# Принудительно используем старый метод fork вместо forkserver
+export PYTHONMULTIPROCESSING=fork
+
+# Ограничиваем Ansible одним потоком (защита от race condition)
+export ANSIBLE_FORKS=1
+
+# Восстанавливаем права на /dev/shm (если предыдущие запуски их сломали)
+sudo rm -rf /dev/shm/*
+sudo chmod 1777 /dev/shm
+```
+
+### 3. Настройка `ansible.cfg`
+Убедитесь, что в файле `ansible.cfg` в корне проекта есть эти строки. Это дублирует защиту от параллельных падений:
+
+```ini
+[defaults]
+forks = 1
+```
+
+### 4. Создание файла секретов
 ```bash
 cp inventory/group_vars/all/secrets.yml.example \
    inventory/group_vars/all/secrets.yml
@@ -89,7 +111,7 @@ ansible-vault encrypt inventory/group_vars/all/secrets.yml
 
 *Имя Wi-Fi сети (SSID) не является секретом и настраивается в `main.yml` (переменная `wifi_ssid`).*
 
-### 3. Настройка переменных
+### 5. Настройка переменных
 Проверьте в `inventory/group_vars/all/main.yml` как минимум:
 ```yaml
 target_disk: /dev/nvme0n1
@@ -98,9 +120,21 @@ workstation_user: lohovap
 wifi_ssid: "Ваш_SSID"
 timezone: Europe/Moscow
 ```
-Имена сетевых интерфейсов (`wifi_interface` / `ethernet_interface`) определяются автоматически, но их можно переопределить вручную.
 
-### 4. Запуск установки из LiveCD
+---
+
+## 🚀 Быстрый старт
+
+### 1. Подготовка LiveCD
+```bash
+# Опционально: доступ по SSH к Live-среде
+sudo apt update && sudo apt install -y openssh-server
+sudo passwd ubuntu
+sudo systemctl start ssh
+ip -br addr
+```
+
+### 2. Запуск установки из LiveCD
 ```bash
 # Первый запуск (уничтожает данные на диске)
 ansible-playbook playbooks/install.yml \
@@ -122,7 +156,7 @@ ansible-playbook playbooks/install.yml \
 > [!IMPORTANT]  
 > Плейбук **не перезагружает систему автоматически**. Если произошел сбой — просто запустите плейбук снова, но с флагом `-e disk_confirm_wipe=false`. Ansible продолжит с места остановки, не форматируя диск заново.
 
-### 5. Первая загрузка (Критический этап!)
+### 3. Первая загрузка (Критический этап!)
 1. Отключите LiveUSB и перезагрузитесь.
 2. В синем меню **MOK Manager** выберите `Enroll MOK` → `Continue` → `Yes`, введите пароль MOK и нажмите `Reboot`.
 3. Введите пароль LUKS (в консольной раскладке `us`).
@@ -136,7 +170,7 @@ sysctl net.ipv4.tcp_congestion_control          # bbr
 zramctl                                         # /dev/zram0
 ```
 
-### 6. Post-Install (Опционально)
+### 4. Post-Install (Опционально)
 Поскольку `doas` не поддерживается в Ansible как `become_method` из коробки, второй плейбук запускается от имени `root` с сохранением текущего окружения:
 
 ```bash
@@ -198,6 +232,8 @@ doas env HOME=/root PATH="$PATH" ansible-playbook \
 | `apt-get install` не находит пакет | Зеркало Ubuntu 26.04 может отличаться. Отредактируйте `inventory/group_vars/all/packages.yml`. |
 | `nvidia-smi` не работает после установки | Перезагрузитесь, пройдите MOK Manager. Проверьте `dkms status` и `/etc/dkms/framework.conf`. |
 | `nerdctl` не подключается | Проверьте `systemctl status containerd buildkit` и наличие сокета `/run/containerd/containerd.sock`. |
+| `target is busy` при `umount -R /mnt` в роли `finalize` | Процессы от предыдущих запусков Ansible (или systemd внутри chroot) удерживают точки монтирования. **Решение:** в `roles/finalize/tasks/main.yml` перед `umount` добавить `command: fuser -km {{ root_mnt }}` (с `failed_when: false`), а сам `umount` заменить на `umount -l -R` (lazy). |
+| `sudo: unable to open pty` после `fuser -km` | Убийство процессов внутри `/mnt` часто задевает `/dev/pts` самого LiveCD. Это не лечится на месте — нужна перезагрузка LiveCD. Данные на целевом диске при этом уже сохранены. |
 
 ---
 
