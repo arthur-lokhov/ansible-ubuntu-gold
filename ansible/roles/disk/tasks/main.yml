@@ -69,6 +69,17 @@
     boot_end_mib: "{{ 1 + (efi_size_mib | int) + (boot_size_mib | int) }}"
     luks_start_mib: "{{ 1 + (efi_size_mib | int) + (boot_size_mib | int) }}"
 
+- name: Force kernel to release the old partition table
+  ansible.builtin.shell: |
+    # Принудительно заставляем ядро перечитать таблицу разделов
+    partprobe {{ target_disk }} || true
+    blockdev --rereadpt {{ target_disk }} || true
+
+    # Ждем, пока udev завершит обработку изменений
+    udevadm settle
+  changed_when: false
+  failed_when: false
+
 - name: Create a fresh GPT label
   ansible.builtin.command:
     cmd: "parted --script --align optimal {{ target_disk }} mklabel gpt"
