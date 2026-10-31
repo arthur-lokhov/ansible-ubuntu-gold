@@ -286,12 +286,6 @@
   loop: "{{ lvm_volumes }}"
   when: item.mountpoint != '/'
 
-- name: Create /boot/efi inside the target tree
-  ansible.builtin.file:
-    path: "{{ root_mnt }}/boot/efi"
-    state: directory
-    mode: "0755"
-
 - name: Check whether /boot is already mounted
   ansible.builtin.command: "mountpoint -q {{ root_mnt }}/boot"
   register: disk_boot_mount_check
@@ -308,9 +302,19 @@
   failed_when: false
   changed_when: false
 
+- name: Ensure /boot/efi mount point exists
+  ansible.builtin.file:
+    path: /mnt/boot/efi
+    state: directory
+    mode: "0755"
+
 - name: Mount the EFI System Partition
-  ansible.builtin.command: "mount {{ efi_partition }} {{ root_mnt }}/boot/efi"
-  when: disk_efi_mount_check.rc != 0
+  ansible.posix.mount:
+    path: /mnt/boot/efi
+    src: "{{ efi_partition }}"
+    fstype: vfat
+    opts: "umask=0077"
+    state: mounted
 
 - name: Check which target mount points are active
   ansible.builtin.command: "mountpoint -q {{ root_mnt }}{{ item.mountpoint }}"
