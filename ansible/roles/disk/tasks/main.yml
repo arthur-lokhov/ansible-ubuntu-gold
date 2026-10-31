@@ -286,6 +286,12 @@
   loop: "{{ lvm_volumes }}"
   when: item.mountpoint != '/'
 
+- name: Create the /boot mount point
+  ansible.builtin.file:
+    path: "{{ root_mnt }}/boot"
+    state: directory
+    mode: "0755"
+
 - name: Check whether /boot is already mounted
   ansible.builtin.command: "mountpoint -q {{ root_mnt }}/boot"
   register: disk_boot_mount_check
