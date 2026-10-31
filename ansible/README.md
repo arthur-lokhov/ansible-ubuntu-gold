@@ -54,7 +54,7 @@ No Galaxy collections or external roles are required.  Everything uses
 
   ```bash
   sudo apt update
-  sudo apt install -y ansible-core python3-apt
+  sudo apt install -y ansible-core python3-apt git
   ```
 
   A virtualenv with `pip install ansible-core` works too; the inventory uses

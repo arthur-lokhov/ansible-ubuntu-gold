@@ -88,19 +88,12 @@
     mode: "0644"
 
 - name: Forbid snapd through APT pinning
-  ansible.builtin.copy:
+  ansible.builtin.template:
+    src: nosnap.pref.j2
     dest: "{{ root_mnt }}/etc/apt/preferences.d/nosnap.pref"
     owner: root
     group: root
     mode: "0644"
-    content: |
-      // Never install snapd, even explicitly.
-      //
-      // Pin: release a=* applies to every archive (main, universe, third-party),
-      // so snapd cannot sneak in through a different suite later.
-      Package: snapd
-      Pin: release a=*
-      Pin-Priority: {{ snap_pin_priority }}
 
 - name: Write the base APT policy
   ansible.builtin.template:
