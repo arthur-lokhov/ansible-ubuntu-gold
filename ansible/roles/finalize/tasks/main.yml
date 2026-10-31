@@ -23,8 +23,15 @@
   ansible.builtin.command: sync
   changed_when: false
 
-- name: Recursively unmount the target tree
-  ansible.builtin.command: "umount -R {{ root_mnt }}"
+- name: Kill processes holding the target tree
+  ansible.builtin.command: "fuser -km {{ root_mnt }}"
+  failed_when: false
+  changed_when: false
+
+- name: Recursively unmount the target tree (lazy)
+  ansible.builtin.command: "umount -l -R {{ root_mnt }}"
+  changed_when: true
+  failed_when: false
 
 - name: Verify that the target tree is fully unmounted
   ansible.builtin.command: "mountpoint -q {{ root_mnt }}"
