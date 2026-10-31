@@ -124,18 +124,46 @@
       installer mid-run.  Unplug the LiveUSB or point target_disk at the
       internal disk (see `lsblk`).
 
-- name: Reject a disk that is currently mounted
+- name: Check if partitions of the target disk are mounted
   ansible.builtin.command: "lsblk -nlo MOUNTPOINT {{ target_disk }}"
   register: preflight_mounts
   changed_when: false
 
-- name: Fail when partitions of the target disk are mounted
+- name: Unmount mounted partitions on the target disk (if confirmed)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # Получаем список точек монтирования, сортируем в обратном порядке (сначала вложенные)
+    for mnt in $(lsblk -nlo MOUNTPOINT {{ target_disk }} | grep -v '^$' | sort -r); do
+      if [ "$mnt" = "[SWAP]" ]; then
+        # Отключаем swap, если он активен на целевом диске
+        dev=$(lsblk -nlo NAME,MOUNTPOINT {{ target_disk }} | grep '\[SWAP\]' | awk '{print "/dev/"$1}')
+        echo "Disabling swap on $dev..."
+        swapoff "$dev" || true
+      else
+        echo "Unmounting $mnt..."
+        umount -f "$mnt" || umount -l "$mnt"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  when:
+    - preflight_mounts.stdout | trim != ''
+    - disk_confirm_wipe | default(false) | bool
+  changed_when: true
+
+- name: Re-evaluate mounted partitions
+  ansible.builtin.command: "lsblk -nlo MOUNTPOINT {{ target_disk }}"
+  register: preflight_mounts_after
+  changed_when: false
+  when: preflight_mounts.stdout | trim != ''
+
+- name: Fail when partitions of the target disk are still mounted
   ansible.builtin.assert:
-    that: preflight_mounts.stdout | trim == ''
+    that: (preflight_mounts_after.stdout | default('') | trim) == ''
     fail_msg: >-
-      Something from {{ target_disk }} is mounted:
-      {{ preflight_mounts.stdout | trim }}
-      Unmount it before running the install.
+      Something from {{ target_disk }} is still mounted after attempting to unmount:
+      {{ preflight_mounts_after.stdout | default(preflight_mounts.stdout) | trim }}
+      Unmount it manually before running the install.
 
 - name: Read the target disk size
   ansible.builtin.command: "lsblk -bdno SIZE {{ target_disk }}"
