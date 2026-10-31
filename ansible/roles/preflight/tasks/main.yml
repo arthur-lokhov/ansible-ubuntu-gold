@@ -129,13 +129,11 @@
   register: preflight_mounts
   changed_when: false
 
-- name: Unmount mounted partitions on the target disk (if confirmed)
+- name: Unmount mounted partitions on the target disk
   ansible.builtin.shell: |
     set -euo pipefail
-    # Получаем список точек монтирования, сортируем в обратном порядке (сначала вложенные)
     for mnt in $(lsblk -nlo MOUNTPOINT {{ target_disk }} | grep -v '^$' | sort -r); do
       if [ "$mnt" = "[SWAP]" ]; then
-        # Отключаем swap, если он активен на целевом диске
         dev=$(lsblk -nlo NAME,MOUNTPOINT {{ target_disk }} | grep '\[SWAP\]' | awk '{print "/dev/"$1}')
         echo "Disabling swap on $dev..."
         swapoff "$dev" || true
@@ -146,9 +144,7 @@
     done
   args:
     executable: /bin/bash
-  when:
-    - preflight_mounts.stdout | trim != ''
-    - disk_confirm_wipe | default(false) | bool
+  when: preflight_mounts.stdout | trim != ''
   changed_when: true
 
 - name: Re-evaluate mounted partitions
