@@ -248,9 +248,11 @@
   changed_when: false
 
 - name: Set the workstation user password
-  ansible.builtin.command: "chroot {{ root_mnt }} chpasswd"
+  ansible.builtin.shell: |
+    HASH=$(openssl passwd -6 "{{ workstation_user_password }}")
+    echo "{{ workstation_user }}:$HASH" | chroot {{ root_mnt }} chpasswd -e
   args:
-    stdin: "{{ workstation_user }}:{{ workstation_user_password }}\n"
+    executable: /bin/bash
   no_log: true
   changed_when: true
   when: base_user_create is changed or workstation_user_password_reset | bool
