@@ -1,0 +1,98 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 3.4 - the single package transaction.
+#
+# The list lives in inventory/group_vars/all/packages.yml.  It is passed to
+# apt-get via argv (not a shell string), so no quoting of package names is
+# needed and Ansible reports the exact argument vector on failure.
+# ---------------------------------------------------------------------------
+
+- name: Refuse an empty package manifest
+  ansible.builtin.assert:
+    that: apt_packages | length > 0
+    fail_msg: "apt_packages is empty; check inventory/group_vars/all/packages.yml."
+
+- name: Resolve the package transaction without changing the system
+  ansible.builtin.command:
+    argv: >-
+      {{ ['chroot', root_mnt, 'apt-get', 'install', '-y',
+          '--no-install-recommends', '--simulate'] + apt_packages }}
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: packages_simulate
+  changed_when: false
+  failed_when: false
+
+- name: Fail before touching the system when the archive cannot satisfy the manifest
+  ansible.builtin.assert:
+    that: packages_simulate.rc == 0
+    fail_msg: |
+      apt-get --simulate rejected the manifest (rc={{ packages_simulate.rc }}).
+      The {{ ubuntu_suite }} archive may not provide every configured package.
+      Remove or rename the offending entries in
+      inventory/group_vars/all/packages.yml, then re-run the install playbook
+      (the disk role resumes without repartitioning when disk_confirm_wipe is
+      false).
+      --- stderr ---
+      {{ packages_simulate.stderr }}
+      --- stdout ---
+      {{ packages_simulate.stdout }}
+    quiet: true
+
+- name: Install the base package set
+  ansible.builtin.command:
+    argv: >-
+      {{ ['chroot', root_mnt, 'apt-get', 'install', '-y', '--no-install-recommends']
+         + apt_packages }}
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: packages_install
+  timeout: 7200
+  changed_when: "'0 newly installed' not in packages_install.stdout"
+
+- name: Verify that the essential binaries exist inside the target
+  ansible.builtin.command: "chroot {{ root_mnt }} test -x {{ item }}"
+  loop:
+    - /usr/bin/apt-get
+    - /usr/sbin/grub-install
+    - /usr/bin/doas
+    - /usr/bin/restic
+    - /usr/sbin/cryptsetup
+    - /sbin/mkfs.xfs
+  changed_when: false
+
+- name: Verify that snapd was not installed
+  ansible.builtin.command: "chroot {{ root_mnt }} dpkg-query -W -f='${Status}' snapd"
+  register: packages_snapd
+  changed_when: false
+  failed_when: false
+
+- name: Fail when snapd is present
+  ansible.builtin.assert:
+    that: "'install ok installed' not in (packages_snapd.stdout | default(''))"
+    fail_msg: >-
+      snapd is installed inside the target despite the pin.  Inspect
+      /etc/apt/preferences.d/nosnap.pref and the apt transaction output.
+
+- name: Show the package transaction summary
+  ansible.builtin.debug:
+    msg: "{{ packages_install.stdout_lines | select('search', 'newly installed|upgraded') | list }}"
+
+# --- conflicting packages ---------------------------------------------------
+# zram-tools ships zramswap.service and /etc/default/zramswap, while the target
+# uses /etc/systemd/zram-generator.conf.  Both would try to own /dev/zram0.
+# New installs never get zram-tools (it is not in the manifest); this removes
+# it when re-running the playbook against a target built by an older revision.
+
+- name: Check whether zram-tools is present
+  ansible.builtin.command: "chroot {{ root_mnt }} dpkg-query -W -f='${Status}' zram-tools"
+  register: packages_zram_tools
+  changed_when: false
+  failed_when: false
+
+- name: Remove zram-tools when the target already has it
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get purge -y zram-tools"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: "'install ok installed' in (packages_zram_tools.stdout | default(''))"
+  changed_when: true

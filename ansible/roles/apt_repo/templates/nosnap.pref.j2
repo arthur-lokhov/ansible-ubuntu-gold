@@ -1,0 +1,7 @@
+// Never install snapd, even explicitly.
+//
+// Pin: release a=* applies to every archive (main, universe, third-party),
+// so snapd cannot sneak in through a different suite later.
+Package: snapd
+Pin: release a=*
+Pin-Priority: {{ snap_pin_priority }}

@@ -1,0 +1,151 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 5 - GRUB, Secure Boot / MOK and Plymouth.
+#
+# The order is intentional and must not be changed:
+#   1. write /etc/default/grub (no GRUB theme: the plain menu is deliberate);
+#   2. grub-install  -> writes shim/grub EFI binaries into the ESP;
+#   3. update-grub   -> generates /boot/grub/grub.cfg for the installed kernels;
+#   4. MOK key       -> requested before the NVIDIA DKMS build;
+#   5. Plymouth      -> select plymouth_theme (default: text);
+#   6. update-initramfs -k all -> rebuilds every initramfs with LUKS + Plymouth.
+# ---------------------------------------------------------------------------
+
+- name: Verify that the ESP is mounted
+  ansible.builtin.command: "mountpoint -q {{ root_mnt }}/boot/efi"
+  register: boot_esp_check
+  changed_when: false
+
+- name: Fail when the ESP is not mounted
+  ansible.builtin.assert:
+    that: boot_esp_check.rc == 0
+    fail_msg: "{{ root_mnt }}/boot/efi is not a mount point; run the disk role first."
+
+- name: Write /etc/default/grub
+  ansible.builtin.template:
+    src: grub.j2
+    dest: "{{ root_mnt }}/etc/default/grub"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install GRUB into the EFI System Partition
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} grub-install
+    --target=x86_64-efi
+    --efi-directory=/boot/efi
+    --bootloader-id={{ grub_bootloader_id }}
+    --uefi-secure-boot
+    --recheck
+
+- name: Generate /boot/grub/grub.cfg
+  ansible.builtin.command: "chroot {{ root_mnt }} update-grub"
+
+# --- MOK ------------------------------------------------------------------
+
+- name: Ensure the MOK directory exists
+  ansible.builtin.file:
+    path: "{{ root_mnt }}{{ mok_key_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: secure_boot_manage_mok | bool
+
+- name: Check for an existing MOK private key
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}{{ mok_key_dir }}/MOK.priv"
+  register: boot_mok_priv
+  when: secure_boot_manage_mok | bool
+
+- name: Check for an existing MOK certificate
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}{{ mok_key_dir }}/MOK.der"
+  register: boot_mok_der
+  when: secure_boot_manage_mok | bool
+
+- name: Generate a 2048-bit MOK key and self-signed certificate
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} openssl req -new -x509 -newkey rsa:2048
+    -keyout {{ mok_key_dir }}/MOK.priv
+    -outform DER
+    -out {{ mok_key_dir }}/MOK.der
+    -nodes -days 3650
+    -subj "/CN={{ mok_common_name }}/"
+  when:
+    - secure_boot_manage_mok | bool
+    - not ((boot_mok_priv.stat.exists | default(false)) and (boot_mok_der.stat.exists | default(false)))
+
+- name: Test whether the MOK certificate is already enrolled
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} mokutil --test-key {{ mok_key_dir }}/MOK.der
+  register: boot_mok_test
+  failed_when: false
+  changed_when: false
+  when: secure_boot_manage_mok | bool
+
+- name: Request MOK enrollment for the next boot
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} mokutil --import {{ mok_key_dir }}/MOK.der
+  args:
+    stdin: "{{ mok_password }}\n{{ mok_password }}\n"
+  register: boot_mok_import
+  failed_when: false
+  no_log: true
+  # mokutil may wait for a terminal instead of reading stdin; do not hang the
+  # whole install on that.
+  timeout: 60
+  when:
+    - secure_boot_manage_mok | bool
+    - "'is already enrolled' not in (boot_mok_test.stdout | default(''))"
+
+- name: Warn when the non-interactive MOK import was rejected
+  ansible.builtin.debug:
+    msg:
+      - "mokutil --import returned rc={{ boot_mok_import.rc | default('skipped') }}."
+      - "mokutil may insist on a terminal for the password prompt."
+      - "If enrollment is not pending after this run, execute manually:"
+      - "  doas mokutil --import {{ mok_key_dir }}/MOK.der"
+  when:
+    - secure_boot_manage_mok | bool
+    - boot_mok_import.rc | default(0) != 0
+
+- name: Remind the operator about MOK Manager
+  ansible.builtin.debug:
+    msg:
+      - "MOK enrollment is now pending."
+      - "After reboot, MOK Manager will appear before GRUB."
+      - "Choose Enroll MOK -> Continue -> Yes, enter the MOK password, then Reboot."
+      - "Without this step the NVIDIA DKMS modules will not load under Secure Boot."
+  when: secure_boot_manage_mok | bool
+
+# --- Plymouth --------------------------------------------------------------
+
+- name: Verify that the selected Plymouth theme exists
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}/usr/share/plymouth/themes/{{ plymouth_theme }}/{{ plymouth_theme }}.plymouth"
+  register: boot_plymouth_theme
+
+- name: Fail when the Plymouth theme is missing
+  ansible.builtin.assert:
+    that: boot_plymouth_theme.stat.exists
+    fail_msg: >-
+      Plymouth theme {{ plymouth_theme }} is not installed.  The default `text`
+      theme ships in the base `plymouth` package; set plymouth_theme to a theme
+      that exists inside the target or install the package providing it.
+
+- name: Register the Plymouth theme as an alternative
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} update-alternatives --install
+    /usr/share/plymouth/themes/default.plymouth default.plymouth
+    /usr/share/plymouth/themes/{{ plymouth_theme }}/{{ plymouth_theme }}.plymouth
+    200
+  changed_when: false
+
+- name: Select the Plymouth theme non-interactively
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} update-alternatives --set default.plymouth
+    /usr/share/plymouth/themes/{{ plymouth_theme }}/{{ plymouth_theme }}.plymouth
+
+- name: Rebuild all initramfs images (LUKS + Plymouth)
+  ansible.builtin.command: "chroot {{ root_mnt }} update-initramfs -u -k all"

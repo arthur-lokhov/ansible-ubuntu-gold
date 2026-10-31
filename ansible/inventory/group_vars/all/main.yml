@@ -1,0 +1,236 @@
+# ---------------------------------------------------------------------------
+# Main configuration.  Every value here is intentionally explicit: the goal of
+# this project is a deterministic workstation, not a set of hidden defaults.
+#
+# Secrets live in ./secrets.yml (see secrets.yml.example) and are never stored
+# in this file.  Do not put passphrases or Wi-Fi keys here.
+# ---------------------------------------------------------------------------
+
+# --- Target filesystem tree -------------------------------------------------
+# The target system is assembled below this directory from the LiveCD.  Keep it
+# at /mnt unless you know exactly what you are doing: the disk role, the chroot
+# role and the finalize role all derive from it.
+root_mnt: /mnt
+
+# --- Hardware profile -------------------------------------------------------
+# The document describes a single NVMe disk.  For SATA/SAS use /dev/sda; the
+# partition suffix ("p" for NVMe/mmcblk, "" otherwise) is derived automatically.
+target_disk: /dev/nvme0n1
+
+# First run on a blank or already partitioned disk: pass
+#   -e disk_confirm_wipe=true
+# on the command line.  This is a hard confirmation that the disk may be
+# destroyed.  On later runs leave it false: existing partitions, LUKS header,
+# LVM volumes and filesystems are then reused (idempotent resume).
+disk_confirm_wipe: false
+
+# Safety rail for the partition layout below.  A disk smaller than this is
+# rejected before anything is written.  Adjust if you resize the LVM volumes.
+disk_min_size_gb: 560
+
+# EFI System Partition and /boot.  Values are in MiB.  The document explains
+# why both are 1 GiB: several kernels/initramfs images must fit into the ESP.
+efi_size_mib: 1024
+boot_size_mib: 1024
+
+# --- LUKS2 ------------------------------------------------------------------
+luks_name: cryptroot
+luks_cipher: aes-xts-plain64
+luks_key_size: 512
+luks_hash: sha512
+# Argon2 calibration time in milliseconds.  5000 is a deliberate compromise:
+# unlocking takes noticeably longer on the NVMe (roughly 5 s here) but raises
+# the cost of an offline passphrase search.  Lower it to 2000-3000 if the boot
+# delay matters more than the extra margin; do NOT lower it just for speed.
+luks_iter_time: 5000
+luks_discard: true          # allow TRIM from the encrypted layer to the NVMe
+luks_passphrase: "{{ vault_luks_passphrase }}"
+
+# --- LVM + filesystems ------------------------------------------------------
+vg_name: vg0
+
+# The last volume must use 100%FREE.  Order matters: LVM allocates in the
+# listed order, so `home` gets whatever is left after root/var_log/libvirt/
+# containers.  Do not put the 100%FREE volume anywhere except last.
+#
+# Mount options are the same as in the document: noatime everywhere, no async,
+# no discard on XFS (LUKS discard is configured on the crypttab side).
+lvm_volumes:
+  - name: root
+    size: 100G
+    mountpoint: /
+    fstype: xfs
+    options: "defaults,noatime"
+    dump: 0
+    passno: 1
+  - name: var_log
+    size: 30G
+    mountpoint: /var/log
+    fstype: xfs
+    options: "defaults,noatime"
+    dump: 0
+    passno: 2
+  - name: libvirt
+    size: 250G
+    mountpoint: /var/lib/libvirt
+    fstype: xfs
+    options: "defaults,noatime"
+    dump: 0
+    passno: 2
+  - name: containers
+    size: 150G
+    mountpoint: /var/lib/containers
+    fstype: xfs
+    options: "defaults,noatime"
+    dump: 0
+    passno: 2
+  - name: home
+    size: 100%FREE
+    mountpoint: /home
+    fstype: xfs
+    options: "defaults,noatime"
+    dump: 0
+    passno: 2
+
+boot_mount_options: "defaults,noatime"
+efi_mount_options: "umask=0077,noatime"
+tmpfs_mount_options: "defaults,nosuid,nodev,noatime,mode=1777"
+
+# --- Ubuntu archive ---------------------------------------------------------
+ubuntu_suite: resolute                 # Ubuntu 26.04 LTS codename
+ubuntu_mirror_http: "http://ru.archive.ubuntu.com/ubuntu"
+apt_mirror_https: "https://ru.archive.ubuntu.com/ubuntu/"
+apt_components:
+  - main
+  - restricted
+  - universe
+  - multiverse
+apt_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+# debootstrap architecture level.  amd64v3 requires AVX2/BMI2/FMA etc. and is
+# correct for the i5-11400 from the document.  Set to `amd64` for older CPUs.
+debootstrap_arch: amd64v3
+debootstrap_variant: minbase
+debootstrap_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+# Snap is forbidden system-wide.  -10 is used instead of -1 because old APT
+# versions treated -1 loosely; see the document, stage 3.2.
+snap_pin_priority: -10
+
+# --- Identity ---------------------------------------------------------------
+workstation_hostname: ustation
+timezone: Europe/Moscow
+locale_lang: en_US.UTF-8
+locale_list:
+  - "en_US.UTF-8 UTF-8"
+  - "ru_RU.UTF-8 UTF-8"
+
+keyboard_model: pc105
+keyboard_layout: "us,ru"
+keyboard_options: "grp:caps_toggle,caps:none"
+
+# The daily user.  Root is deliberately locked; this user must be in `wheel`
+# because /etc/doas.conf grants privileges through that group.
+workstation_user: devops
+workstation_user_shell: /bin/bash
+workstation_user_groups:
+  - wheel
+  - netdev
+  - audio
+  - video
+  - input
+  - render
+workstation_user_password: "{{ vault_user_password }}"
+# Set to true to reset the password on every playbook run.  Normally the
+# password is set only when the user is created.
+workstation_user_password_reset: false
+
+# --- Network (systemd-networkd + wpa_supplicant + systemd-resolved) ---------
+# Empty interface names mean "auto-detect from /sys/class/net".  Override them
+# if the installed system uses different predictable names than the LiveCD.
+wifi_enabled: true
+wifi_interface: ""
+ethernet_interface: ""
+wifi_ssid: "CHANGE_ME_SSID"
+wifi_psk: "{{ vault_wifi_psk }}"
+wifi_country: RU
+wifi_route_metric: 600
+ethernet_route_metric: 100
+
+# --- Boot / Secure Boot -----------------------------------------------------
+grub_timeout: 10
+# `splash` starts Plymouth.  The plain `text` theme prints status/service
+# messages (fsck, cryptsetup, network) instead of a logo.  Drop `quiet` from
+# grub_cmdline_linux_default if you also want the raw kernel/module messages on
+# the console.
+grub_cmdline_linux_default: "quiet splash"
+grub_bootloader_id: ubuntu
+# The `text` theme ships in the base `plymouth` package and is registered as
+# an update-alternatives choice.  It is deliberately not `spinner`: a build
+# machine is easier to debug when the boot screen prints what is happening.
+plymouth_theme: text
+
+# MOK is needed for the out-of-tree NVIDIA modules.  The certificate is created
+# once and enrolled physically in MOK Manager after the first reboot; the
+# enrollment itself cannot be automated by design.
+secure_boot_manage_mok: true
+mok_key_dir: /var/lib/shim-signed/mok
+mok_common_name: "Ubuntu Workstation MOK"
+mok_password: "{{ vault_mok_password }}"
+
+# --- Post-install: NVIDIA ---------------------------------------------------
+nvidia_driver_package: nvidia-driver-610
+# Follow the global Secure Boot switch: no MOK work when secure_boot_manage_mok
+# is false, otherwise the nvidia role would ask for a password that was never
+# configured.
+nvidia_manage_mok: "{{ secure_boot_manage_mok }}"
+
+# --- Post-install: libvirt/KVM ---------------------------------------------
+libvirt_packages:
+  - qemu-system-x86
+  - qemu-utils
+  - libvirt-daemon-system
+  - libvirt-daemon-config-network
+  - libvirt-clients
+  - virt-manager
+  - virtinst
+  - bridge-utils
+  - cpu-checker
+  - ovmf
+  - qemu-system-gui
+  - dnsmasq-base
+  - libxml2-utils
+libvirt_network_name: default
+
+# --- Post-install: containers ----------------------------------------------
+nerdctl_version: "2.4.2"
+nerdctl_archive_url: "https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-full-{{ nerdctl_version }}-linux-amd64.tar.gz"
+containers_data_root: /var/lib/containers
+containerd_root: "{{ containers_data_root }}/containerd"
+buildkit_root: "{{ containers_data_root }}/buildkit"
+container_user_aliases: true
+container_smoke_test: false   # set true to run `nerdctl run --rm hello-world`
+
+# --- Post-install: restic (optional) ---------------------------------------
+# The main document only mentions restic in the introduction; the detailed
+# recipe lives in all-my-work/rustic.md.  The role is therefore disabled by
+# default and can be enabled independently.
+restic_enabled: false
+restic_repository: /mnt/backup/restic
+restic_backup_paths:
+  - /home
+  - /etc
+restic_keep_daily: 7
+restic_keep_weekly: 4
+restic_keep_monthly: 6
+restic_schedule_hour: 3
+restic_schedule_minute: 0
+restic_password: "{{ vault_restic_password }}"
+# Initialise the repository only when the external disk is already mounted.
+restic_initialize: false
+
+# --- Finish -----------------------------------------------------------------
+# The playbook deliberately does NOT reboot automatically: MOK Manager needs a
+# human at the keyboard, and an unattended reboot of a freshly installed
+# encrypted workstation is a good way to lose a machine.  See README.md.
+finalize_close_luks: true

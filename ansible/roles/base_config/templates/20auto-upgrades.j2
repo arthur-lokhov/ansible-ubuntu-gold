@@ -1,0 +1,5 @@
+// Enable periodic security updates.  The packages themselves are already in
+// the base manifest; this file makes the automatic behaviour explicit.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";

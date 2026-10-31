@@ -1,0 +1,20 @@
+# BBR congestion control + fair queue
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# Low latency: do not keep excessive unsent bytes in the socket
+net.ipv4.tcp_notsent_lowat = 16384
+
+# Socket buffers (reasonable ceiling for a 32+ GiB workstation)
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+
+# Faster reuse of TIME_WAIT sockets
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+
+# Incoming connection queues
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192

@@ -1,0 +1,5 @@
+Types: deb
+URIs: {{ apt_mirror_https }}
+Suites: {{ ubuntu_suite }} {{ ubuntu_suite }}-updates {{ ubuntu_suite }}-security
+Components: {{ apt_components | join(' ') }}
+Signed-By: {{ apt_keyring }}

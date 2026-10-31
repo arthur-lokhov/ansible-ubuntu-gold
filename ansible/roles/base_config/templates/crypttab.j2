@@ -1,0 +1,5 @@
+# Managed by Ansible (roles/base_config/templates/crypttab.j2).
+#
+# discard allows TRIM to reach the NVMe; the confidentiality trade-off is
+# documented in docs/expert-install.md, stage 4.5.
+{{ luks_name }} UUID={{ luks_uuid }} none luks{% if luks_discard %},discard{% endif %}

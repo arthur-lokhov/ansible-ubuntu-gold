@@ -1,0 +1,6 @@
+// Explicit TLS verification policy.
+//
+// Both options are true by default.  The file documents the intent and protects
+// against a future configuration that accidentally disables verification.
+Acquire::https::Verify-Peer "true";
+Acquire::https::Verify-Host "true";

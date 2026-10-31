@@ -1,0 +1,42 @@
+---
+# ===========================================================================
+# STAGE 1 - run from the Ubuntu LiveCD.
+#
+# This playbook builds the target system inside /mnt.  It never reboots the
+# machine and never enrols the MOK key (both actions require a human).
+#
+# First run (destroys the target disk):
+#   ansible-playbook playbooks/install.yml \
+#     -e disk_confirm_wipe=true --ask-vault-pass
+#
+# Resume / re-run without repartitioning:
+#   ansible-playbook playbooks/install.yml --ask-vault-pass
+#
+# See ../README.md for the complete operating procedure.
+# ===========================================================================
+
+- name: Ubuntu 26.04 LTS expert install (LiveCD stage)
+  hosts: livecd
+  gather_facts: true
+  any_errors_fatal: true
+  max_fail_percentage: 0
+
+  roles:
+    - role: preflight
+      tags: [preflight, always]
+    - role: disk
+      tags: [disk]
+    - role: debootstrap
+      tags: [debootstrap]
+    - role: chroot_mounts
+      tags: [chroot]
+    - role: apt_repo
+      tags: [apt, repos]
+    - role: packages
+      tags: [apt, packages]
+    - role: base_config
+      tags: [config, base]
+    - role: boot
+      tags: [boot, grub, secureboot]
+    - role: finalize
+      tags: [finalize]

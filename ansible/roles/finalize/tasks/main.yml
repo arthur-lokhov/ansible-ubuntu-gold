@@ -1,0 +1,57 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 6 - final cleanup and release of the target.
+#
+# The playbook does not reboot.  A reboot is a physical operation here: MOK
+# Manager needs a human, and the LUKS passphrase must be typed in the console
+# layout configured in stage 4.2.  The final debug message prints the exact
+# next steps.
+# ---------------------------------------------------------------------------
+
+- name: Remove package archives from the target
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get clean"
+  changed_when: false
+
+- name: Remove orphaned packages
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get autoremove --purge -y"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: finalize_autoremove
+  changed_when: "'0 to remove' not in finalize_autoremove.stdout"
+
+- name: Flush filesystem buffers before unmounting
+  ansible.builtin.command: sync
+  changed_when: false
+
+- name: Recursively unmount the target tree
+  ansible.builtin.command: "umount -R {{ root_mnt }}"
+
+- name: Verify that the target tree is fully unmounted
+  ansible.builtin.command: "mountpoint -q {{ root_mnt }}"
+  register: finalize_mount_check
+  failed_when: false
+  changed_when: false
+
+- name: Fail when something is still mounted under the target
+  ansible.builtin.assert:
+    that: finalize_mount_check.rc != 0
+    fail_msg: >-
+      {{ root_mnt }} is still a mount point.  Run `findmnt -R {{ root_mnt }}`
+      and `umount -R {{ root_mnt }}` manually before rebooting.
+
+- name: Close the LUKS container
+  ansible.builtin.command: "cryptsetup close --deferred {{ luks_name }}"
+  when: finalize_close_luks | bool
+
+- name: Installation complete
+  ansible.builtin.debug:
+    msg:
+      - "Base system installed.  Target tree released."
+      - ""
+      - "Next steps:"
+      - "  1. Reboot the machine (remove the USB stick first)."
+      - "  2. In MOK Manager choose: Enroll MOK -> Continue -> Yes -> password -> Reboot."
+      - "  3. Type the LUKS passphrase in the US console layout."
+      - "  4. Log in as {{ workstation_user }} (root login is locked)."
+      - "  5. Verify: doas id; networkctl status {{ wifi_interface | default('wlp3s0', true) }}; sysctl net.ipv4.tcp_congestion_control; zramctl"
+      - "  6. Run the post-install playbook from the installed system (see README.md)."

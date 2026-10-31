@@ -1,0 +1,45 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 2 - debootstrap the minimal target system.
+#
+# The target root must already be mounted by the disk role.  debootstrap is
+# idempotent at the task level: if /usr/bin/apt-get already exists in the
+# target, the bootstrap is not repeated.
+# ---------------------------------------------------------------------------
+
+- name: Verify that the target root is mounted
+  ansible.builtin.command: "mountpoint -q {{ root_mnt }}"
+  register: debootstrap_root_check
+  changed_when: false
+
+- name: Fail when the target root is not mounted
+  ansible.builtin.assert:
+    that: debootstrap_root_check.rc == 0
+    fail_msg: >-
+      {{ root_mnt }} is not a mount point.  The disk role must run before
+      debootstrap and must finish successfully.
+
+- name: Run debootstrap for the minimal system
+  ansible.builtin.command:
+    cmd: >-
+      debootstrap
+      --arch={{ debootstrap_arch }}
+      --variant={{ debootstrap_variant }}
+      --keyring={{ debootstrap_keyring }}
+      {{ ubuntu_suite }}
+      {{ root_mnt }}
+      {{ ubuntu_mirror_http }}
+    creates: "{{ root_mnt }}/usr/bin/apt-get"
+
+- name: Verify the bootstrap result
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}/usr/bin/apt-get"
+  register: debootstrap_apt
+
+- name: Fail when debootstrap did not produce a usable system
+  ansible.builtin.assert:
+    that: debootstrap_apt.stat.exists
+    fail_msg: >-
+      debootstrap finished but {{ root_mnt }}/usr/bin/apt-get is missing.
+      Inspect the debootstrap output above; the archive, keyring or network may
+      be unavailable.

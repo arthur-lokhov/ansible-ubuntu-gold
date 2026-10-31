@@ -1,0 +1,5 @@
+---
+# Enable the periodic unattended-upgrades timer.  The introductory chapter of
+# the document promises automated security updates; the package alone does not
+# enable them on a debootstrap system.
+unattended_upgrades_enable: true

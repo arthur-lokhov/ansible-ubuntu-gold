@@ -1,0 +1,9 @@
+root = "{{ buildkit_root }}"
+
+[worker.oci]
+  enabled = false
+
+[worker.containerd]
+  enabled = true
+  address = "/run/containerd/containerd.sock"
+  namespace = "default"

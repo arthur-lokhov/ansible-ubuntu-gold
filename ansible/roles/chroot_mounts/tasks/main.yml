@@ -1,0 +1,52 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 2 - enter the target system.
+#
+# The document bind-mounts /dev, /dev/pts, /proc, /sys and /run.  We use
+# --rbind instead of --bind for /dev, /sys and /run so that nested mounts are
+# visible inside the chroot:
+#
+#   * /dev/pts and /dev/shm are needed by apt/dpkg;
+#   * /sys/firmware/efi/efivars is needed by grub-install and mokutil;
+#   * /run/systemd is needed by systemctl enable.
+#
+# /etc/resolv.conf is copied (not bind-mounted) because the target will later
+# replace it with a symlink to systemd-resolved's stub resolver.  A bind mount
+# would make that replacement impossible.
+# ---------------------------------------------------------------------------
+
+- name: Verify that the target root is mounted
+  ansible.builtin.command: "mountpoint -q {{ root_mnt }}"
+  register: chroot_root_check
+  changed_when: false
+
+- name: Fail when the target root is not mounted
+  ansible.builtin.assert:
+    that: chroot_root_check.rc == 0
+    fail_msg: "{{ root_mnt }} is not mounted; run the disk and debootstrap roles first."
+
+- name: Check which chroot bind mounts are already active
+  ansible.builtin.command: "mountpoint -q {{ root_mnt }}{{ item }}"
+  loop:
+    - /dev
+    - /proc
+    - /sys
+    - /run
+  register: chroot_bind_checks
+  failed_when: false
+  changed_when: false
+
+- name: Bind-mount kernel interfaces into the chroot
+  ansible.builtin.command: "mount --rbind {{ item.item }} {{ root_mnt }}{{ item.item }}"
+  loop: "{{ chroot_bind_checks.results }}"
+  when: item.rc != 0
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Provide DNS to the build environment
+  ansible.builtin.copy:
+    src: /etc/resolv.conf
+    dest: "{{ root_mnt }}/etc/resolv.conf"
+    remote_src: true
+    mode: "0644"
+    force: true

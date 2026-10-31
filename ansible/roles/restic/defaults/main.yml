@@ -1,0 +1,5 @@
+---
+# restic is optional and disabled by default; see group_vars/all/main.yml.
+restic_packages:
+  - restic
+  - cron

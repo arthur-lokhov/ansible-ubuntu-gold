@@ -1,0 +1,125 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 7.3 - rootful containerd + nerdctl + BuildKit.
+#
+# Rootful mode is a deliberate choice from the document: rootless nerdctl was
+# unstable around short-lived container logging (`broken pipe`, `ttrpc: closed`).
+# Containers therefore run as root; do not run untrusted images.
+#
+# All image/layer data lives on the dedicated /var/lib/containers volume.
+# ---------------------------------------------------------------------------
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd
+    state: present
+    update_cache: true
+
+- name: Ensure container configuration directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/containerd
+    - /etc/buildkit
+    - "{{ containerd_root }}"
+    - "{{ buildkit_root }}"
+
+- name: Write the containerd configuration
+  ansible.builtin.template:
+    src: containerd-config.toml.j2
+    dest: /etc/containerd/config.toml
+    owner: root
+    group: root
+    mode: "0644"
+  register: containers_containerd_config
+
+- name: Enable containerd, restarting it only when the configuration changed
+  ansible.builtin.systemd_service:
+    name: containerd
+    enabled: true
+    state: "{{ 'restarted' if containers_containerd_config.changed else 'started' }}"
+
+- name: Download the nerdctl-full release
+  ansible.builtin.get_url:
+    url: "{{ nerdctl_archive_url }}"
+    dest: "/tmp/nerdctl-full-{{ nerdctl_version }}-linux-amd64.tar.gz"
+    mode: "0644"
+    force: false
+
+- name: Unpack nerdctl, buildkitd, runc and CNI into /usr/local
+  ansible.builtin.unarchive:
+    src: "/tmp/nerdctl-full-{{ nerdctl_version }}-linux-amd64.tar.gz"
+    dest: /usr/local
+    remote_src: true
+    creates: /usr/local/bin/nerdctl
+
+- name: Write the BuildKit daemon configuration
+  ansible.builtin.template:
+    src: buildkitd.toml.j2
+    dest: /etc/buildkit/buildkitd.toml
+    owner: root
+    group: root
+    mode: "0644"
+  register: containers_buildkit_config
+
+- name: Write the BuildKit systemd unit
+  ansible.builtin.template:
+    src: buildkit.service.j2
+    dest: /etc/systemd/system/buildkit.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: containers_buildkit_unit
+
+- name: Reload systemd after adding buildkit.service
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: containers_buildkit_unit.changed
+
+- name: Enable BuildKit, restarting it only when its configuration changed
+  ansible.builtin.systemd_service:
+    name: buildkit
+    enabled: true
+    state: >-
+      {{ 'restarted' if (containers_buildkit_config.changed or containers_buildkit_unit.changed)
+         else 'started' }}
+
+- name: Add convenience aliases for the rootful nerdctl
+  ansible.builtin.lineinfile:
+    path: "/home/{{ workstation_user }}/.bashrc"
+    line: "{{ item }}"
+    create: true
+    owner: "{{ workstation_user }}"
+    group: "{{ workstation_user }}"
+    mode: "0644"
+  loop:
+    - "alias docker='doas nerdctl'"
+    - "alias nerdctl='doas nerdctl'"
+  when: container_user_aliases | bool
+
+- name: Check the nerdctl version
+  ansible.builtin.command: /usr/local/bin/nerdctl version
+  register: containers_version
+  changed_when: false
+  failed_when: false
+
+- name: Show the container stack state
+  ansible.builtin.debug:
+    msg:
+      - "{{ containers_version.stdout_lines | default([]) }}"
+      - "{{ ['WARNING: nerdctl is not answering; check containerd/buildkit.'] if containers_version.rc != 0 else [] }}"
+
+- name: Run the hello-world smoke test
+  ansible.builtin.command: /usr/local/bin/nerdctl run --rm hello-world
+  register: containers_smoke
+  changed_when: true
+  when: container_smoke_test | bool
+
+- name: Show the smoke-test result
+  ansible.builtin.debug:
+    msg: "{{ containers_smoke.stdout_lines | default([]) }}"
+  when: container_smoke_test | bool

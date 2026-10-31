@@ -1,0 +1,238 @@
+# ---------------------------------------------------------------------------
+# Package manifest for the base system (document stage 3.4).
+#
+# The list follows the final `apt install` command from the document with the
+# corrections stated in its prose:
+#
+#   * linux-tools-7.0.0-42-generic  -> linux-tools-generic-hwe-26.04
+#     (a version-pinned tools package breaks after the first HWE kernel update)
+#   * linux-perf is pulled in by linux-tools-generic-hwe-26.04, so it is not
+#     listed separately
+#   * manpages-posix-dev, qrencode, xfsdump and python3-rich are omitted
+#     (the document explicitly excludes them from the final manifest)
+#   * grub-theme-breeze is omitted: the boot role now uses GRUB's plain menu
+#     (there is no theme to copy into /boot)
+#   * plymouth-themes is omitted: the `text` theme selected by `plymouth_theme`
+#     in main.yml ships in the base `plymouth` package; the graphical themes are
+#     not used
+#
+# One package is added:
+#   * systemd-zram-generator - the document writes /etc/systemd/zram-generator.conf,
+#     which is consumed by this generator.  zram-tools is deliberately NOT
+#     installed: it ships its own zramswap.service with a different config file,
+#     would compete with the generator for /dev/zram0, and is not needed.
+#
+# Every package is installed with --no-install-recommends and the global APT
+# policy has Install-Recommends=false, so anything critical must be listed
+# explicitly (cracklib-runtime, publicsuffix, mesa-utils, xclip, etc.).
+# ---------------------------------------------------------------------------
+
+apt_packages:
+  # --- kernel, boot chain, Secure Boot -------------------------------------
+  # systemd and systemd-sysv are listed explicitly: debootstrap minbase does
+  # not install the init system, and without systemd-sysv there is no /sbin/init
+  # to hand over to after the initramfs.
+  - systemd
+  - systemd-sysv
+  - linux-generic-hwe-26.04
+  - grub-efi-amd64-signed
+  - shim-signed
+  - mokutil
+  - efibootmgr
+  - secureboot-db
+  - os-prober
+  - plymouth
+
+  # --- storage: LUKS, LVM, XFS, initramfs ----------------------------------
+  - cryptsetup-initramfs
+  - lvm2
+  - thin-provisioning-tools
+  - xfsprogs
+  - dosfstools
+  - attr
+  - initramfs-tools
+  - util-linux-extra
+  - fdisk
+
+  # --- base CLI and editors -------------------------------------------------
+  - opendoas
+  - neovim
+  - wget
+  - curl
+  - unzip
+  - zip
+  - zstd
+  - pigz
+  - pbzip2
+  - pixz
+  - bzip2
+  - lz4
+  - lzop
+  - ca-certificates
+  - openssl
+  - bash-completion
+  - less
+  - patch
+  - dialog
+  - man-db
+  - manpages
+  - manpages-dev
+
+  # --- development / crypto tooling ----------------------------------------
+  - git
+  - make
+  - binutils
+  - gnutls-bin
+  - python3
+  - python3-venv
+  # python3-apt is required by the ansible.builtin.apt module used in the
+  # post-install playbook.  It is not part of a debootstrap system.
+  - python3-apt
+  - openssh-client
+  - keychain
+  - ssh-askpass
+  - rsync
+  - jq
+
+  # --- networking without NetworkManager -----------------------------------
+  - systemd-resolved
+  - wpasupplicant
+  - iw
+  - wireless-regdb
+  - libsasl2-modules
+  - libsasl2-modules-gssapi-mit
+  - nftables
+  - publicsuffix
+  - dns-root-data
+  - iproute2
+  - iputils-ping
+  - bind9-dnsutils
+  - ethtool
+  - tcpdump
+  - mtr-tiny
+  - traceroute
+  - whois
+  - socat
+  - netcat-openbsd
+  - iftop
+  - nethogs
+  - iperf3
+  - nmap
+  - net-tools
+  - vnstat
+
+  # --- audio ----------------------------------------------------------------
+  - pipewire
+  - pipewire-pulse
+  - pipewire-alsa
+  - pipewire-audio
+  - wireplumber
+  - libpipewire-0.3-modules-extra
+  - libpipewire-0.3-common
+  - alsa-utils
+  - alsa-ucm-conf
+  - alsa-topology-conf
+  - libasound2-plugins
+  - libcanberra-pulse
+  - rtkit
+  - firmware-sof-signed
+
+  # --- session, PAM, policy, secrets ---------------------------------------
+  - dbus
+  - dbus-user-session
+  - libpam-systemd
+  - libpam-cap
+  - polkitd
+  - pkexec
+  - libpwquality1
+  - cracklib-runtime
+  - libsecret-1-0
+  - keyutils
+  - libnss-systemd
+  - pass
+  - pass-otp
+  - oathtool
+  - dirmngr
+  - scdaemon
+  - pcscd
+  - libfido2-1
+  - acl
+  - libengine-pkcs11-openssl
+
+  # --- system services and hardware ---------------------------------------
+  - systemd-timesyncd
+  - systemd-oomd
+  - systemd-cryptsetup
+  - systemd-hwe-hwdb
+  - linux-sysctl-defaults
+  - thermald
+  - lm-sensors
+  - i2c-tools
+  - fancontrol
+  - mesa-vulkan-drivers
+  - mesa-utils
+  - pciutils
+  - usbutils
+  - read-edid
+  - v4l-utils
+
+  # --- storage/performance diagnostics ------------------------------------
+  - smartmontools
+  - nvme-cli
+  - hdparm
+  - fio
+  - ioping
+  - sysstat
+  - iotop
+  - duf
+  - btop
+  - lsof
+  - psmisc
+  - tree
+  - ncdu
+  - htop
+  - strace
+
+  # --- console, XWayland, desktop glue ------------------------------------
+  - locales
+  - console-setup
+  - kbd
+  - xdg-user-dirs
+  - xdg-utils
+  - libglib2.0-data
+  - libfile-mimeinfo-perl
+  - xauth
+  - x11-utils
+  - x11-xserver-utils
+  - xclip
+  - librsvg2-common
+  - librsvg2-bin
+  - gstreamer1.0-plugins-good
+  - gstreamer1.0-tools
+  - gstreamer1.0-x
+  - opus-tools
+  - libnotify-bin
+  - wl-clipboard
+  - fuse3
+
+  # --- eBPF / tracing -------------------------------------------------------
+  - bpftool
+  - linux-tools-generic-hwe-26.04
+
+  # --- maintenance ----------------------------------------------------------
+  - unattended-upgrades
+  - apt-listchanges
+  - needrestart
+  - restic
+
+  # --- compressed swap ------------------------------------------------------
+  # Only the systemd generator: it consumes /etc/systemd/zram-generator.conf
+  # written by the base_config role.  zram-tools is intentionally absent.
+  - systemd-zram-generator
+
+  # --- firmware explicitly selected for this hardware ----------------------
+  # linux-firmware and its subpackages arrive transitively through
+  # linux-generic-hwe-26.04; these three are listed to document intent.
+  - linux-firmware-misc
+  - linux-firmware-intel-wireless
+  - linux-firmware-intel-misc

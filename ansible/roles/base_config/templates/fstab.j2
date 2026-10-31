@@ -1,0 +1,11 @@
+# Managed by Ansible (roles/base_config/templates/fstab.j2).
+# Manual edits will be overwritten on the next run.  The same layout is also
+# available as the /usr/local/sbin/gen-fstab maintenance script.
+#
+# <file system>                              <mount point>            <type>  <options>                                  <dump> <pass>
+{% for volume in lvm_volumes %}
+{{ '%-42s' | format('UUID=' ~ fs_uuids[volume.name]) }} {{ '%-24s' | format(volume.mountpoint) }} {{ '%-7s' | format(volume.fstype) }} {{ '%-49s' | format(volume.options) }} {{ '%-6s' | format(volume.dump) }} {{ volume.passno }}
+{% endfor %}
+{{ '%-42s' | format('UUID=' ~ fs_uuids.boot) }} {{ '%-24s' | format('/boot') }} {{ '%-7s' | format('ext4') }} {{ '%-49s' | format(boot_mount_options) }} 0 2
+{{ '%-42s' | format('UUID=' ~ fs_uuids.efi) }} {{ '%-24s' | format('/boot/efi') }} {{ '%-7s' | format('vfat') }} {{ '%-49s' | format(efi_mount_options) }} 0 1
+{{ '%-42s' | format('tmpfs') }} {{ '%-24s' | format('/tmp') }} {{ '%-7s' | format('tmpfs') }} {{ '%-49s' | format(tmpfs_mount_options) }} 0 0

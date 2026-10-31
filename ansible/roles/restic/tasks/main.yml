@@ -1,0 +1,97 @@
+---
+# ---------------------------------------------------------------------------
+# Optional restic backup (from all-my-work/rustic.md).
+#
+# Disabled unless `restic_enabled=true`.  The repository is expected on an
+# external disk mounted at restic_repository's parent (for example /mnt/backup).
+# The role never mounts that disk automatically: mounting external media is an
+# operator decision, especially on an encrypted workstation.
+# ---------------------------------------------------------------------------
+
+- name: Configure restic backups
+  when: restic_enabled | bool
+  block:
+    - name: Install restic and cron
+      ansible.builtin.apt:
+        name: "{{ restic_packages }}"
+        state: present
+        update_cache: true
+
+    - name: Enable and start cron
+      ansible.builtin.systemd_service:
+        name: cron
+        enabled: true
+        state: started
+
+    - name: Create the restic configuration directory
+      ansible.builtin.file:
+        path: /etc/restic
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Write the restic password file
+      ansible.builtin.copy:
+        content: "{{ restic_password }}\n"
+        dest: /etc/restic/password
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install the backup script
+      ansible.builtin.template:
+        src: backup.sh.j2
+        dest: /usr/local/bin/backup.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Schedule the daily backup
+      ansible.builtin.cron:
+        name: "restic backup"
+        user: root
+        minute: "{{ restic_schedule_minute }}"
+        hour: "{{ restic_schedule_hour }}"
+        job: "/usr/local/bin/backup.sh >> /var/log/restic.log 2>&1"
+
+    - name: Check whether the repository is already initialised
+      ansible.builtin.command: "restic cat config"
+      environment:
+        RESTIC_REPOSITORY: "{{ restic_repository }}"
+        RESTIC_PASSWORD_FILE: /etc/restic/password
+      register: restic_config
+      changed_when: false
+      failed_when: false
+      when: restic_initialize | bool
+
+    - name: Verify that the backup medium is mounted
+      ansible.builtin.stat:
+        path: "{{ restic_repository | dirname }}"
+      register: restic_media
+      when: restic_initialize | bool
+
+    - name: Fail when initialisation is requested but the medium is absent
+      ansible.builtin.assert:
+        that: restic_media.stat.isdir | default(false)
+        fail_msg: >-
+          {{ restic_repository | dirname }} does not exist.  Mount the backup
+          disk before running with restic_initialize=true.
+      when: restic_initialize | bool
+
+    - name: Initialise the restic repository
+      ansible.builtin.command: "restic init"
+      environment:
+        RESTIC_REPOSITORY: "{{ restic_repository }}"
+        RESTIC_PASSWORD_FILE: /etc/restic/password
+      when:
+        - restic_initialize | bool
+        - (restic_config.rc | default(1)) != 0
+
+    - name: Show the backup schedule
+      ansible.builtin.debug:
+        msg:
+          - "Repository: {{ restic_repository }}"
+          - "Schedule: daily at {{ '%02d' | format(restic_schedule_hour) }}:{{ '%02d' | format(restic_schedule_minute) }}"
+          - "Run `restic check` periodically, and `restic check --read-data` after major changes."

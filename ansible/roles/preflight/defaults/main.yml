@@ -1,0 +1,19 @@
+---
+# Tools that must exist in the Live environment before the target disk is
+# touched.  The LiveCD does not contain debootstrap or the LVM/XFS tools by
+# default.  They are installed into the LiveCD RAM filesystem only and leave no
+# trace in the target system.
+livecd_packages:
+  - debootstrap
+  - cryptsetup
+  - lvm2
+  - xfsprogs
+  - dosfstools
+  - parted
+  - gdisk
+  - rsync
+  - curl
+  - ca-certificates
+
+hw_info_path: /tmp/hw-info.txt
+preflight_require_uefi: true

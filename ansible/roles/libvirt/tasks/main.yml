@@ -1,0 +1,88 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 7.2 - libvirt / KVM.
+#
+# libvirtd is a system service; the workstation user gets direct access through
+# the libvirt and kvm groups.  The default NAT network is started and marked
+# autostart.
+# ---------------------------------------------------------------------------
+
+- name: Install the libvirt/KVM stack
+  ansible.builtin.apt:
+    name: "{{ libvirt_packages }}"
+    state: present
+    update_cache: true
+
+- name: Check hardware virtualization support
+  ansible.builtin.command: kvm-ok
+  register: libvirt_kvm_ok
+  changed_when: false
+  failed_when: false
+
+- name: Fail when KVM acceleration is unavailable
+  ansible.builtin.assert:
+    that: "'KVM acceleration can be used' in libvirt_kvm_ok.stdout"
+    fail_msg: >-
+      KVM acceleration is not available.  Check that VT-x/AMD-V and (for
+      nested virtualization) the relevant BIOS settings are enabled.
+      kvm-ok output: {{ libvirt_kvm_ok.stdout }}
+
+- name: Enable and start libvirtd
+  ansible.builtin.systemd_service:
+    name: libvirtd
+    enabled: true
+    state: started
+
+- name: Ensure the libvirt and kvm groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - libvirt
+    - kvm
+
+- name: Add the workstation user to libvirt and kvm
+  ansible.builtin.user:
+    name: "{{ workstation_user }}"
+    groups:
+      - libvirt
+      - kvm
+    append: true
+
+- name: Wait until libvirtd answers on its socket
+  ansible.builtin.command: virsh net-list --all --name
+  register: libvirt_networks_all
+  changed_when: false
+  retries: 15
+  delay: 2
+  until: libvirt_networks_all.rc == 0
+
+- name: Define the default NAT network when it is missing
+  ansible.builtin.command: >-
+    virsh net-define /usr/share/libvirt/networks/default.xml
+  when: libvirt_network_name not in libvirt_networks_all.stdout_lines
+
+- name: List active libvirt networks
+  ansible.builtin.command: virsh net-list --name
+  register: libvirt_networks
+  changed_when: false
+
+- name: Start the default NAT network
+  ansible.builtin.command: "virsh net-start {{ libvirt_network_name }}"
+  when: libvirt_network_name not in libvirt_networks.stdout_lines
+
+- name: Mark the default network for autostart
+  ansible.builtin.command: "virsh net-autostart {{ libvirt_network_name }}"
+  changed_when: false
+
+- name: Validate the virtualization host
+  ansible.builtin.command: virt-host-validate qemu
+  register: libvirt_validate
+  changed_when: false
+  failed_when: false
+
+- name: Show the virtualization validation result
+  ansible.builtin.debug:
+    msg: >-
+      {{ libvirt_validate.stdout_lines | default([]) }}
+      {{ ['WARN: virt-host-validate reported failures; SEV/TDX warnings are expected on consumer CPUs.'] if libvirt_validate.rc != 0 else [] }}

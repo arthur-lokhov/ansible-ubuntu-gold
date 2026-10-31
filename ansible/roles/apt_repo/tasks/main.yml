@@ -1,0 +1,142 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 3.1-3.3 - APT sources, HTTPS verification, Snap pinning and policy.
+#
+# The order is critical:
+#   1. use debootstrap's HTTP source to install ca-certificates;
+#   2. replace the source with DEB822 over HTTPS;
+#   3. install the Snap pin *before* any package can pull snapd transitively;
+#   4. install the base APT policy before the first large package transaction.
+# ---------------------------------------------------------------------------
+
+- name: Bootstrap the package index from debootstrap's HTTP source
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get update"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Install CA certificates before switching to HTTPS
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} apt-get install -y --no-install-recommends
+    ca-certificates openssl
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+# debootstrap is normally invoked with --keyring and installs ubuntu-keyring in
+# the target.  Do not rely on that: the DEB822 source below uses Signed-By with
+# an explicit path, so the file must exist before the next `apt-get update`.
+- name: Check for the Ubuntu archive keyring in the target
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}{{ apt_keyring }}"
+  register: apt_keyring_check
+
+- name: Ensure the keyring directory exists in the target
+  ansible.builtin.file:
+    path: "{{ root_mnt }}/usr/share/keyrings"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: not apt_keyring_check.stat.exists
+
+- name: Copy the LiveCD archive keyring when the target lacks it
+  ansible.builtin.copy:
+    src: "{{ apt_keyring }}"
+    dest: "{{ root_mnt }}{{ apt_keyring }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: not apt_keyring_check.stat.exists
+
+- name: Ensure ubuntu-keyring is installed so future updates keep the keyring
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} apt-get install -y --no-install-recommends ubuntu-keyring
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: apt_keyring_package
+  changed_when: "'0 newly installed' not in apt_keyring_package.stdout"
+
+- name: Remove the legacy one-line sources file
+  ansible.builtin.file:
+    path: "{{ root_mnt }}/etc/apt/sources.list"
+    state: absent
+
+- name: Ensure APT configuration directories exist
+  ansible.builtin.file:
+    path: "{{ root_mnt }}{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/apt/sources.list.d
+    - /etc/apt/apt.conf.d
+    - /etc/apt/preferences.d
+
+- name: Write the DEB822 Ubuntu source
+  ansible.builtin.template:
+    src: ubuntu.sources.j2
+    dest: "{{ root_mnt }}/etc/apt/sources.list.d/ubuntu.sources"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enforce TLS peer and host verification
+  ansible.builtin.template:
+    src: 99-https-verify.j2
+    dest: "{{ root_mnt }}/etc/apt/apt.conf.d/99-https-verify"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Forbid snapd through APT pinning
+  ansible.builtin.template:
+    src: nosnap.pref.j2
+    dest: "{{ root_mnt }}/etc/apt/preferences.d/nosnap.pref"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the base APT policy
+  ansible.builtin.template:
+    src: 00-base-policy.j2
+    dest: "{{ root_mnt }}/etc/apt/apt.conf.d/00-base-policy"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Refresh the index from the HTTPS source
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get update"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Read the snapd pin result
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-cache policy snapd"
+  register: apt_snap_policy
+  changed_when: false
+  failed_when: false
+
+- name: Simulate an explicit snapd installation
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get install -y --simulate snapd"
+  register: apt_snap_simulate
+  changed_when: false
+  failed_when: false
+
+- name: Verify that snapd cannot be installed even explicitly
+  ansible.builtin.assert:
+    that: apt_snap_simulate.rc != 0
+    fail_msg: |
+      snapd is still installable despite the pin.  Check
+      /etc/apt/preferences.d/nosnap.pref inside the target.
+
+      apt-cache policy snapd:
+      {{ apt_snap_policy.stdout }}
+
+      apt-get --simulate snapd:
+      {{ apt_snap_simulate.stdout }}
+    quiet: true
+
+- name: Upgrade the minimal system to the current security level
+  ansible.builtin.command: "chroot {{ root_mnt }} apt-get upgrade -y"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: apt_upgrade
+  changed_when: "'0 upgraded, 0 newly installed' not in apt_upgrade.stdout"

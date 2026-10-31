@@ -1,0 +1,257 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 0 - hardware inventory and pre-flight checks.
+#
+# Everything here is read-only except:
+#   * installation of LiveCD tools (debootstrap, cryptsetup, LVM, XFS, parted)
+#   * /tmp/hw-info.txt, which is copied back to the controller
+#
+# No target disk is modified by this role.
+# ---------------------------------------------------------------------------
+
+- name: Show install target
+  ansible.builtin.debug:
+    msg:
+      - "Target disk: {{ target_disk }}"
+      - "Suite: {{ ubuntu_suite }} ({{ debootstrap_arch }})"
+      - "Hostname: {{ workstation_hostname }}"
+      - "User: {{ workstation_user }}"
+
+- name: Check that Ansible is running as root
+  ansible.builtin.command: id -u
+  register: preflight_uid
+  changed_when: false
+  failed_when: false
+
+- name: Require root privileges
+  ansible.builtin.assert:
+    that: preflight_uid.stdout | trim == '0'
+    fail_msg: >-
+      The install playbook must run with become=true (the LiveCD `ubuntu` user
+      has passwordless sudo).  Check ansible_become in inventory/hosts.yml.
+
+- name: Require UEFI firmware
+  ansible.builtin.stat:
+    path: /sys/firmware/efi
+  register: preflight_efi
+
+- name: Fail on legacy BIOS boot
+  ansible.builtin.assert:
+    that:
+      - not preflight_require_uefi | bool or preflight_efi.stat.isdir | default(false)
+    fail_msg: >-
+      The Live environment was booted in legacy BIOS mode.  The EFI partition,
+      shim-signed and grub-efi-amd64-signed require UEFI.  Reboot the USB
+      stick in UEFI mode and start again.
+
+- name: Verify that required secrets are present
+  ansible.builtin.assert:
+    that:
+      - vault_luks_passphrase is defined
+      - (vault_luks_passphrase | default('')) | length >= 8
+      - "'CHANGE_ME' not in (vault_luks_passphrase | default(''))"
+      - vault_user_password is defined
+      - (vault_user_password | default('')) | length >= 8
+      - "'CHANGE_ME' not in (vault_user_password | default(''))"
+      - not (secure_boot_manage_mok | bool) or ((vault_mok_password | default('')) | length >= 8)
+      - not (secure_boot_manage_mok | bool) or ("CHANGE_ME" not in (vault_mok_password | default('')))
+      - not (wifi_enabled | bool) or ((vault_wifi_psk | default('')) | length >= 8)
+      - not (wifi_enabled | bool) or ("CHANGE_ME" not in (vault_wifi_psk | default('')))
+      - not (wifi_enabled | bool) or ((wifi_ssid | default('')) | length > 0)
+      - not (wifi_enabled | bool) or ("CHANGE_ME" not in (wifi_ssid | default('')))
+      - not (restic_enabled | bool) or ((vault_restic_password | default('')) | length >= 8)
+      - not (restic_enabled | bool) or ("CHANGE_ME" not in (vault_restic_password | default('')))
+    fail_msg: >-
+      Copy inventory/group_vars/all/secrets.yml.example to secrets.yml, fill in
+      real values, encrypt it with ansible-vault and pass --ask-vault-pass.
+      The Wi-Fi SSID is set in inventory/group_vars/all/main.yml.
+    quiet: true
+
+- name: Verify that the target disk exists
+  ansible.builtin.stat:
+    path: "{{ target_disk }}"
+  register: preflight_disk
+
+- name: Fail when the target is not a block device
+  ansible.builtin.assert:
+    that:
+      - preflight_disk.stat.exists
+      - preflight_disk.stat.isblk | default(false)
+    fail_msg: >-
+      {{ target_disk }} is not a block device.  Check target_disk in
+      inventory/group_vars/all/main.yml and `lsblk`.
+
+- name: Resolve the install target to a device node
+  ansible.builtin.command: "readlink -f {{ target_disk }}"
+  register: preflight_target_device
+  changed_when: false
+
+- name: Identify the disk that hosts the running LiveCD
+  # casper mounts the ISO at /cdrom (and, on newer images, also exposes it as
+  # /run/live/medium).  Find the backing block device and walk up to its parent
+  # disk, so a target like /dev/nvme0n1 can be compared with the USB stick.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for mnt in /run/live/medium /cdrom /media/cdrom /lib/live/mount/medium; do
+      if mountpoint -q "$mnt"; then
+        src=$(findmnt -n -o SOURCE --target "$mnt")
+        src=${src%%\[*}                 # drop "[/subdir]" from bind mounts
+        dev=$(readlink -f "$src")
+        parent=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -n 1)
+        if [ -n "$parent" ]; then
+          printf '/dev/%s\n' "$parent"
+        else
+          printf '%s\n' "$dev"
+        fi
+        exit 0
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: preflight_live_medium
+  changed_when: false
+  failed_when: false
+
+- name: Refuse to install onto the LiveCD medium
+  ansible.builtin.assert:
+    that: >-
+      (preflight_live_medium.stdout | default('') | trim) == '' or
+      (preflight_live_medium.stdout | trim) != (preflight_target_device.stdout | trim)
+    fail_msg: >-
+      {{ target_disk }} resolves to {{ preflight_target_device.stdout | trim }},
+      which is also the disk the running Live environment was booted from
+      ({{ preflight_live_medium.stdout | trim }}).  Wiping it would destroy the
+      installer mid-run.  Unplug the LiveUSB or point target_disk at the
+      internal disk (see `lsblk`).
+
+- name: Reject a disk that is currently mounted
+  ansible.builtin.command: "lsblk -nlo MOUNTPOINT {{ target_disk }}"
+  register: preflight_mounts
+  changed_when: false
+
+- name: Fail when partitions of the target disk are mounted
+  ansible.builtin.assert:
+    that: preflight_mounts.stdout | trim == ''
+    fail_msg: >-
+      Something from {{ target_disk }} is mounted:
+      {{ preflight_mounts.stdout | trim }}
+      Unmount it before running the install.
+
+- name: Read the target disk size
+  ansible.builtin.command: "lsblk -bdno SIZE {{ target_disk }}"
+  register: preflight_size
+  changed_when: false
+
+- name: Derive partition names and size
+  ansible.builtin.set_fact:
+    disk_size_bytes: "{{ preflight_size.stdout | trim | int }}"
+    disk_size_gb: "{{ ((preflight_size.stdout | trim | int) / 1073741824) | round(0) | int }}"
+    partition_suffix: "{{ 'p' if target_disk is search('nvme|mmcblk|loop|md') else '' }}"
+    efi_partition: "{{ target_disk }}{{ 'p' if target_disk is search('nvme|mmcblk|loop|md') else '' }}1"
+    boot_partition: "{{ target_disk }}{{ 'p' if target_disk is search('nvme|mmcblk|loop|md') else '' }}2"
+    luks_partition: "{{ target_disk }}{{ 'p' if target_disk is search('nvme|mmcblk|loop|md') else '' }}3"
+
+- name: Refuse a disk that is too small for the configured volumes
+  ansible.builtin.assert:
+    that: disk_size_gb | int >= disk_min_size_gb | int
+    fail_msg: >-
+      {{ target_disk }} is only {{ disk_size_gb }} GiB.  The configured LVM
+      layout needs at least {{ disk_min_size_gb }} GiB.  Shrink lvm_volumes or
+      lower disk_min_size_gb deliberately.
+
+- name: Install LiveCD build tools
+  ansible.builtin.apt:
+    name: "{{ livecd_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the local artifacts directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../artifacts"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Capture the hardware inventory
+  ansible.builtin.shell: |
+    {
+      echo "===== CPU ====="            ; lscpu | grep -E 'Model name|Vendor|Thread|Core'
+      echo "===== PCI ====="            ; lspci -nn
+      echo "===== USB ====="            ; lsusb
+      echo "===== Block devices ====="  ; lsblk -o NAME,SIZE,TYPE,TRAN,MODEL
+      echo "===== Network ====="        ; ip -br link
+      echo "===== Wi-Fi ====="          ; iw dev 2>/dev/null
+      echo "===== Bluetooth ====="      ; hciconfig -a 2>/dev/null
+      echo "===== Sound ====="          ; cat /proc/asound/cards 2>/dev/null
+      echo "===== TPM ====="            ; ls /sys/class/tpm/ 2>/dev/null
+      echo "===== Kernel modules =====" ; lsmod | grep -E '^(iwlwifi|e1000e|amdgpu|i915|nouveau|nvidia|snd_hda|btusb)'
+    } 2>&1 | tee {{ hw_info_path }}
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Copy the hardware inventory back to the controller
+  ansible.builtin.fetch:
+    src: "{{ hw_info_path }}"
+    dest: "{{ playbook_dir }}/../artifacts/{{ inventory_hostname }}-hw-info.txt"
+    flat: true
+
+- name: Auto-detect the Wi-Fi interface
+  ansible.builtin.shell: |
+    for d in /sys/class/net/*; do
+      [ -d "$d/wireless" ] || continue
+      basename "$d"
+      break
+    done
+  args:
+    executable: /bin/bash
+  register: preflight_wifi_detect
+  changed_when: false
+  when: wifi_interface | length == 0
+
+- name: Resolve the Wi-Fi interface name
+  ansible.builtin.set_fact:
+    wifi_interface: >-
+      {{ wifi_interface if wifi_interface | length > 0
+         else (preflight_wifi_detect.stdout | default('') | trim) }}
+
+- name: Require a Wi-Fi interface when Wi-Fi is enabled
+  ansible.builtin.assert:
+    that: not wifi_enabled | bool or wifi_interface | length > 0
+    fail_msg: >-
+      No wireless interface was detected.  Set wifi_interface explicitly in
+      inventory/group_vars/all/main.yml (for example wlp3s0) or set
+      wifi_enabled=false.
+
+- name: Auto-detect the wired interface
+  ansible.builtin.shell: |
+    for d in /sys/class/net/*; do
+      n=$(basename "$d")
+      [ "$n" = lo ] && continue
+      [ -d "$d/wireless" ] && continue
+      [ -e "$d/device" ] || continue
+      echo "$n"
+      break
+    done
+  args:
+    executable: /bin/bash
+  register: preflight_eth_detect
+  changed_when: false
+  when: ethernet_interface | length == 0
+
+- name: Resolve the wired interface name
+  ansible.builtin.set_fact:
+    ethernet_interface: >-
+      {{ ethernet_interface if ethernet_interface | length > 0
+         else (preflight_eth_detect.stdout | default('') | trim) }}
+
+- name: Show the detected platform
+  ansible.builtin.debug:
+    msg:
+      - "Disk: {{ target_disk }} ({{ disk_size_gb }} GiB, {{ efi_partition }} / {{ boot_partition }} / {{ luks_partition }})"
+      - "Wi-Fi: {{ wifi_interface | default('disabled') }}"
+      - "Ethernet: {{ ethernet_interface | default('not detected') }}"
+      - "Hardware inventory saved to artifacts/{{ inventory_hostname }}-hw-info.txt"

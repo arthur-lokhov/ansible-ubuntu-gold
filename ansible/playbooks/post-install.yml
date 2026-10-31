@@ -1,0 +1,52 @@
+---
+# ===========================================================================
+# STAGE 2 - run on the installed workstation after the first reboot and after
+# the MOK key has been enrolled in MOK Manager.
+#
+# opendoas is not a supported Ansible become plugin, so this playbook expects
+# to be executed as root:
+#
+#   doas env HOME=/root ansible-playbook playbooks/post-install.yml --ask-vault-pass
+#
+# (If you run it as a normal user, every task will fail the uid check at the
+# beginning - that is intentional and safer than a half-configured sudo.)
+#
+# Use tags to install only one part:
+#   ... --tags nvidia
+#   ... --tags libvirt
+#   ... --tags containers
+#   ... --tags restic -e restic_enabled=true
+# ===========================================================================
+
+- name: Post-install workstation configuration
+  hosts: workstation
+  gather_facts: true
+  any_errors_fatal: true
+  max_fail_percentage: 0
+
+  pre_tasks:
+    - name: Require root on the installed system
+      ansible.builtin.command: id -u
+      register: post_uid
+      changed_when: false
+      failed_when: post_uid.stdout | trim != '0'
+      tags: always
+
+    - name: Explain the root requirement
+      ansible.builtin.assert:
+        that: post_uid.stdout | trim == '0'
+        fail_msg: >-
+          This playbook must run as root because opendoas is not a supported
+          Ansible become plugin.  Run it via
+          `doas env HOME=/root ansible-playbook playbooks/post-install.yml`.
+      tags: always
+
+  roles:
+    - role: nvidia
+      tags: [nvidia]
+    - role: libvirt
+      tags: [libvirt, kvm]
+    - role: containers
+      tags: [containers, nerdctl]
+    - role: restic
+      tags: [restic, backup]

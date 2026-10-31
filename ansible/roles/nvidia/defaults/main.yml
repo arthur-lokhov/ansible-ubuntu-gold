@@ -1,0 +1,16 @@
+---
+# Packages required to build the out-of-tree NVIDIA modules against the
+# running kernel.  Canonical's nvidia-driver-610 package carries the patches
+# needed for the 7.0 kernel; the NVIDIA upstream repository does not.
+#
+# dkms is installed up front on purpose: the role configures its signing key
+# BEFORE the driver build, so the very first module build is already signed
+# with the machine-owned MOK key.
+nvidia_build_packages:
+  - build-essential
+  - dkms
+  - "linux-headers-{{ ansible_kernel }}"
+
+# Secure Boot: sign the DKMS modules with the machine-owned key.  Enrollment
+# itself still requires MOK Manager at the next boot.
+nvidia_manage_mok: true

@@ -1,0 +1,9 @@
+// Base APT policy for the workstation.
+//
+// 00- prefix: read before every other apt.conf.d snippet, so these values are
+// the baseline that later files may override deliberately.
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+Dpkg::Options { "--force-confdef"; "--force-confold"; };
+Acquire::Languages "none";
+APT::Get::AutomaticRemove "true";

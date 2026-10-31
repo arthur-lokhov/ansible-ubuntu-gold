@@ -1,0 +1,294 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 4 - system identity and base configuration.
+#
+# Every file below is written inside the target root ({{ root_mnt }}), not into
+# the LiveCD.  The sections are independent: network can be changed without
+# touching fstab, locale can be changed without touching GRUB.
+# ---------------------------------------------------------------------------
+
+- name: Ensure configuration directories exist in the target
+  ansible.builtin.file:
+    path: "{{ root_mnt }}{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/systemd/network
+    - /etc/wpa_supplicant
+    - /etc/sysctl.d
+    - /etc/apt/apt.conf.d
+    - /etc/needrestart/conf.d
+    - /usr/local/sbin
+
+# --- 4.1 / 4.2: environment and keyboard ----------------------------------
+
+- name: Write the system environment (Wayland + clean PATH)
+  ansible.builtin.template:
+    src: environment.j2
+    dest: "{{ root_mnt }}/etc/environment"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write the console keyboard layout
+  ansible.builtin.template:
+    src: keyboard.j2
+    dest: "{{ root_mnt }}/etc/default/keyboard"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply the keyboard layout to the build console (best effort)
+  ansible.builtin.command: "chroot {{ root_mnt }} setupcon"
+  register: base_setupcon
+  failed_when: false
+  changed_when: false
+
+# --- 4.3: systemd-networkd + wpa_supplicant --------------------------------
+
+- name: Write the Wi-Fi networkd profile
+  ansible.builtin.template:
+    src: 25-wireless.network.j2
+    dest: "{{ root_mnt }}/etc/systemd/network/25-wireless.network"
+    owner: root
+    group: root
+    mode: "0644"
+  when: wifi_enabled | bool
+
+- name: Write the wired networkd profile
+  ansible.builtin.template:
+    src: 20-wired.network.j2
+    dest: "{{ root_mnt }}/etc/systemd/network/20-wired.network"
+    owner: root
+    group: root
+    mode: "0644"
+  when: ethernet_interface | length > 0
+
+- name: Write the wpa_supplicant profile
+  ansible.builtin.template:
+    src: wpa_supplicant.conf.j2
+    dest: "{{ root_mnt }}/etc/wpa_supplicant/wpa_supplicant-{{ wifi_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: wifi_enabled | bool
+
+- name: Point resolv.conf at systemd-resolved
+  ansible.builtin.file:
+    src: /run/systemd/resolve/stub-resolv.conf
+    dest: "{{ root_mnt }}/etc/resolv.conf"
+    state: link
+    force: true
+    owner: root
+    group: root
+
+# --- 4.4: network sysctl tuning -------------------------------------------
+
+- name: Write the BBR/fq sysctl drop-in
+  ansible.builtin.template:
+    src: 99-network-performance.conf.j2
+    dest: "{{ root_mnt }}/etc/sysctl.d/99-network-performance.conf"
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- 4.5: fstab and crypttab ----------------------------------------------
+
+- name: Write /etc/crypttab
+  ansible.builtin.template:
+    src: crypttab.j2
+    dest: "{{ root_mnt }}/etc/crypttab"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write /etc/fstab
+  ansible.builtin.template:
+    src: fstab.j2
+    dest: "{{ root_mnt }}/etc/fstab"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the gen-fstab maintenance utility
+  ansible.builtin.template:
+    src: gen-fstab.j2
+    dest: "{{ root_mnt }}/usr/local/sbin/gen-fstab"
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- 4.6: compressed swap --------------------------------------------------
+
+- name: Write the zram-generator configuration
+  ansible.builtin.template:
+    src: zram-generator.conf.j2
+    dest: "{{ root_mnt }}/etc/systemd/zram-generator.conf"
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- 4.7: opendoas ---------------------------------------------------------
+
+- name: Ensure the wheel group exists
+  ansible.builtin.command: "chroot {{ root_mnt }} groupadd -f wheel"
+  changed_when: false
+
+- name: Write the doas policy
+  ansible.builtin.template:
+    src: doas.conf.j2
+    dest: "{{ root_mnt }}/etc/doas.conf"
+    owner: root
+    group: root
+    mode: "0400"
+
+# --- 4.8: locale, time, RTC -----------------------------------------------
+
+- name: Select the generated locales
+  ansible.builtin.template:
+    src: locale.gen.j2
+    dest: "{{ root_mnt }}/etc/locale.gen"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Generate locales
+  ansible.builtin.command: "chroot {{ root_mnt }} locale-gen"
+  changed_when: false
+
+- name: Set the system locale
+  ansible.builtin.command: "chroot {{ root_mnt }} update-locale LANG={{ locale_lang }}"
+  changed_when: false
+
+- name: Set the timezone
+  ansible.builtin.file:
+    src: "/usr/share/zoneinfo/{{ timezone }}"
+    dest: "{{ root_mnt }}/etc/localtime"
+    state: link
+    force: true
+    owner: root
+    group: root
+
+- name: Write the RTC from system time (best effort in chroot)
+  ansible.builtin.command: "chroot {{ root_mnt }} hwclock --systohc"
+  register: base_hwclock
+  failed_when: false
+  changed_when: false
+
+- name: Warn when the RTC could not be written from the chroot
+  ansible.builtin.debug:
+    msg: >-
+      hwclock --systohc failed inside the chroot (usually because /dev/rtc is
+      not exposed).  The RTC will be corrected by systemd-timesyncd after the
+      first boot; this is not a fatal condition.
+  when: base_hwclock.rc | default(0) != 0
+
+# --- 4.9: hostname and hosts ----------------------------------------------
+
+- name: Write the hostname
+  ansible.builtin.copy:
+    content: "{{ workstation_hostname }}\n"
+    dest: "{{ root_mnt }}/etc/hostname"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Write /etc/hosts
+  ansible.builtin.template:
+    src: hosts.j2
+    dest: "{{ root_mnt }}/etc/hosts"
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- 4.10: root lock, user, groups ----------------------------------------
+
+- name: Lock the root password
+  ansible.builtin.command: "chroot {{ root_mnt }} passwd -l root"
+  changed_when: false
+
+- name: Check which user groups already exist
+  ansible.builtin.command: "chroot {{ root_mnt }} getent group {{ item }}"
+  loop: "{{ workstation_user_groups }}"
+  register: base_group_checks
+  failed_when: false
+  changed_when: false
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create missing user groups
+  ansible.builtin.command: "chroot {{ root_mnt }} groupadd {{ item.item }}"
+  loop: "{{ base_group_checks.results }}"
+  when: item.rc != 0
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check whether the workstation user exists
+  ansible.builtin.command: "chroot {{ root_mnt }} getent passwd {{ workstation_user }}"
+  register: base_user_check
+  failed_when: false
+  changed_when: false
+
+- name: Create the workstation user
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} useradd -m -s {{ workstation_user_shell }}
+    -G {{ workstation_user_groups | join(',') }} {{ workstation_user }}
+  when: base_user_check.rc != 0
+  register: base_user_create
+
+- name: Ensure the user is in all required groups
+  ansible.builtin.command: >-
+    chroot {{ root_mnt }} usermod -aG {{ workstation_user_groups | join(',') }}
+    {{ workstation_user }}
+  changed_when: false
+
+- name: Set the workstation user password
+  ansible.builtin.command: "chroot {{ root_mnt }} chpasswd"
+  args:
+    stdin: "{{ workstation_user }}:{{ workstation_user_password }}\n"
+  no_log: true
+  changed_when: true
+  when: base_user_create is changed or workstation_user_password_reset | bool
+
+# --- services and non-interactive maintenance ------------------------------
+
+- name: Build the list of services to enable
+  ansible.builtin.set_fact:
+    base_systemd_services: >-
+      {{ ['systemd-networkd', 'systemd-resolved', 'systemd-timesyncd', 'unattended-upgrades']
+         + (['wpa_supplicant@' ~ wifi_interface ~ '.service'] if wifi_enabled | bool else []) }}
+
+- name: Enable essential systemd services
+  ansible.builtin.command: "chroot {{ root_mnt }} systemctl enable {{ item }}"
+  loop: "{{ base_systemd_services }}"
+  changed_when: false
+
+- name: Configure unattended-upgrades
+  ansible.builtin.template:
+    src: 20auto-upgrades.j2
+    dest: "{{ root_mnt }}/etc/apt/apt.conf.d/20auto-upgrades"
+    owner: root
+    group: root
+    mode: "0644"
+  when: unattended_upgrades_enable | bool
+
+- name: Configure needrestart for non-interactive runs
+  ansible.builtin.template:
+    src: needrestart-ansible.conf.j2
+    dest: "{{ root_mnt }}/etc/needrestart/conf.d/50-ansible.conf"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Verify the doas policy permissions
+  ansible.builtin.stat:
+    path: "{{ root_mnt }}/etc/doas.conf"
+  register: base_doas_stat
+
+- name: Fail when doas.conf is readable by anyone but root
+  ansible.builtin.assert:
+    that: base_doas_stat.stat.mode == '0400'
+    fail_msg: "/etc/doas.conf must be mode 0400; doas refuses to run otherwise."

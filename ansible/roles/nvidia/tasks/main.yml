@@ -1,0 +1,179 @@
+---
+# ---------------------------------------------------------------------------
+# STAGE 7.1 - NVIDIA driver and MOK signing.
+#
+# The driver comes from the Ubuntu archive, not from NVIDIA's repository:
+# Canonical's 615.x packages include the build fixes for Linux 7.0
+# (`cxlds incomplete type`).  nvidia-driver-610 is the transitional package
+# that pulls the current 615 branch.
+#
+# DKMS is configured to sign with the machine-owned MOK key *before* the driver
+# is installed, so even the first module build is Secure-Boot signed.  The
+# certificate still has to be enrolled manually in MOK Manager.
+#
+# 32-bit (i386) libraries are deliberately not installed: they are only needed
+# for Steam/Wine and add attack surface without serving a DevOps workstation.
+# ---------------------------------------------------------------------------
+
+- name: Refresh the APT cache before inspecting the archive
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Verify the running kernel headers are installable
+  ansible.builtin.command: "apt-cache show linux-headers-{{ ansible_kernel }}"
+  register: nvidia_headers_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail with an explanation when the headers are unavailable
+  ansible.builtin.assert:
+    that: nvidia_headers_check.rc == 0
+    fail_msg: >-
+      linux-headers-{{ ansible_kernel }} is not available in the configured
+      archive.  Boot the stock Ubuntu kernel (or install the matching HWE
+      headers) and re-run with --tags nvidia.
+    quiet: true
+
+- name: Install kernel headers, dkms and a compiler
+  ansible.builtin.apt:
+    name: "{{ nvidia_build_packages }}"
+    state: present
+    update_cache: true
+
+- name: Ensure the MOK directory exists
+  ansible.builtin.file:
+    path: "{{ mok_key_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: nvidia_manage_mok | bool
+
+- name: Check for an existing MOK private key
+  ansible.builtin.stat:
+    path: "{{ mok_key_dir }}/MOK.priv"
+  register: nvidia_mok_priv
+  when: nvidia_manage_mok | bool
+
+- name: Check for an existing MOK certificate
+  ansible.builtin.stat:
+    path: "{{ mok_key_dir }}/MOK.der"
+  register: nvidia_mok_der
+  when: nvidia_manage_mok | bool
+
+- name: Generate a MOK key when the install stage did not create one
+  ansible.builtin.command: >-
+    openssl req -new -x509 -newkey rsa:2048
+    -keyout {{ mok_key_dir }}/MOK.priv
+    -outform DER
+    -out {{ mok_key_dir }}/MOK.der
+    -nodes -days 3650
+    -subj "/CN={{ mok_common_name }}/"
+  when:
+    - nvidia_manage_mok | bool
+    - not ((nvidia_mok_priv.stat.exists | default(false)) and (nvidia_mok_der.stat.exists | default(false)))
+
+- name: Test whether the MOK certificate is already enrolled
+  ansible.builtin.command: "mokutil --test-key {{ mok_key_dir }}/MOK.der"
+  register: nvidia_mok_test
+  failed_when: false
+  changed_when: false
+  when: nvidia_manage_mok | bool
+
+- name: Request MOK enrollment when it is still pending
+  ansible.builtin.command: "mokutil --import {{ mok_key_dir }}/MOK.der"
+  args:
+    stdin: "{{ mok_password }}\n{{ mok_password }}\n"
+  register: nvidia_mok_import
+  failed_when: false
+  no_log: true
+  # Do not hang the play when mokutil insists on an interactive terminal.
+  timeout: 60
+  when:
+    - nvidia_manage_mok | bool
+    - "'is already enrolled' not in (nvidia_mok_test.stdout | default(''))"
+
+- name: Warn when the non-interactive MOK import was rejected
+  ansible.builtin.debug:
+    msg:
+      - "mokutil --import returned rc={{ nvidia_mok_import.rc | default('skipped') }}."
+      - "If enrollment is pending, confirm it in MOK Manager at the next boot."
+      - "Otherwise run: doas mokutil --import {{ mok_key_dir }}/MOK.der"
+  when:
+    - nvidia_manage_mok | bool
+    - nvidia_mok_import.rc | default(0) != 0
+
+# --- DKMS signing ----------------------------------------------------------
+
+- name: Check for the DKMS framework configuration
+  ansible.builtin.stat:
+    path: /etc/dkms/framework.conf
+  register: nvidia_dkms_framework_file
+  when: nvidia_manage_mok | bool
+
+- name: Fail when DKMS is installed without its framework configuration
+  ansible.builtin.assert:
+    that: nvidia_dkms_framework_file.stat.exists | default(false)
+    fail_msg: >-
+      /etc/dkms/framework.conf is missing although nvidia_manage_mok is true.
+      Reinstall the dkms package and re-run with --tags nvidia.
+  when: nvidia_manage_mok | bool
+
+- name: Make DKMS sign modules with the machine-owned MOK key
+  ansible.builtin.lineinfile:
+    path: /etc/dkms/framework.conf
+    regexp: '^\s*#?\s*mok_signing_key\s*='
+    line: 'mok_signing_key="{{ mok_key_dir }}/MOK.priv"'
+  when: nvidia_manage_mok | bool
+
+- name: Make DKMS use the matching MOK certificate
+  ansible.builtin.lineinfile:
+    path: /etc/dkms/framework.conf
+    regexp: '^\s*#?\s*mok_certificate\s*='
+    line: 'mok_certificate="{{ mok_key_dir }}/MOK.der"'
+  when: nvidia_manage_mok | bool
+
+- name: Read the DKMS framework configuration
+  ansible.builtin.slurp:
+    src: /etc/dkms/framework.conf
+  register: nvidia_dkms_framework
+  when: nvidia_manage_mok | bool
+
+- name: Verify that DKMS will sign the NVIDIA modules with the enrolled key
+  ansible.builtin.assert:
+    that:
+      - (nvidia_dkms_framework.content | b64decode) is search('(?m)^mok_signing_key="' ~ mok_key_dir ~ '/MOK.priv"$')
+      - (nvidia_dkms_framework.content | b64decode) is search('(?m)^mok_certificate="' ~ mok_key_dir ~ '/MOK.der"$')
+    fail_msg: >-
+      DKMS is not configured to sign with {{ mok_key_dir }}/MOK.priv.  The
+      NVIDIA module would be rejected by Secure Boot.  Check
+      /etc/dkms/framework.conf before installing the driver.
+    quiet: true
+  when: nvidia_manage_mok | bool
+
+- name: Install the NVIDIA driver from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ nvidia_driver_package }}"
+    state: present
+  register: nvidia_install
+
+- name: Show DKMS module status
+  ansible.builtin.command: dkms status
+  register: nvidia_dkms
+  changed_when: false
+  failed_when: false
+
+- name: Try nvidia-smi (expected to fail until the reboot after a fresh install)
+  ansible.builtin.command: nvidia-smi
+  register: nvidia_smi
+  changed_when: false
+  failed_when: false
+
+- name: Report the driver state
+  ansible.builtin.debug:
+    msg:
+      - "DKMS: {{ nvidia_dkms.stdout_lines | default([]) }}"
+      - "nvidia-smi rc: {{ nvidia_smi.rc }}"
+      - "{{ 'REBOOT REQUIRED before the NVIDIA module can load.' if nvidia_install.changed or nvidia_smi.rc != 0 else 'NVIDIA driver already active.' }}"
+      - "If MOK enrollment was pending, confirm it in MOK Manager at the next boot."
